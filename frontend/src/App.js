@@ -2,11 +2,12 @@ import React, { useState, useRef } from 'react';
 
 function App() {
   const [selectedImage, setSelectedImage] = useState(null);
-  const [rawOcrOutput, setRawOcrOutput] = useState(''); // New state for raw OCR text
-  const [structuredDishes, setStructuredDishes] = useState([]); // New state for structured data from OCR
-  const [generatedImages, setGeneratedImages] = useState([]); // This will eventually store generated food images
-  const [isLoading, setIsLoading] = useState(false); // To show loading state
-  const [error, setError] = useState(null); // To handle errors
+  const [rawOcrOutput, setRawOcrOutput] = useState('');
+  const [structuredDishes, setStructuredDishes] = useState([]); // Now from NLU
+  const [nluPrompts, setNluPrompts] = useState([]);
+  const [generatedImages, setGeneratedImages] = useState([]); // Will store actual images later
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   const fileInputRef = useRef(null);
 
@@ -15,65 +16,81 @@ function App() {
     if (file) {
       const reader = new FileReader();
       reader.onloadend = () => {
-        setSelectedImage(reader.result); // Set the image preview
+        setSelectedImage(reader.result);
       };
       reader.readAsDataURL(file);
 
-      // Now, send the file to the backend
-      uploadImageToBackend(file);
+      processMenuImage(file);
 
     } else {
       setSelectedImage(null);
       setRawOcrOutput('');
       setStructuredDishes([]);
+      setNluPrompts([]);
       setGeneratedImages([]);
       setError(null);
     }
   };
 
-  // Function to trigger file input click (for custom button)
   const handleUploadButtonClick = () => {
     fileInputRef.current.click();
   };
 
-  const uploadImageToBackend = async (imageFile) => {
+  const processMenuImage = async (imageFile) => {
     setIsLoading(true);
     setError(null);
     setRawOcrOutput('');
     setStructuredDishes([]);
-    setGeneratedImages([]); // Clear previous results
-
-    const formData = new FormData();
-    formData.append("file", imageFile); // 'file' matches the parameter name in your FastAPI endpoint
+    setNluPrompts([]);
+    setGeneratedImages([]);
 
     try {
-      const response = await fetch('http://localhost:8000/extract_menu_data/', {
+      // --- Step 1: Call OCR Service to get raw text ---
+      const ocrFormData = new FormData();
+      ocrFormData.append("file", imageFile);
+
+      const ocrResponse = await fetch('http://localhost:8000/extract_menu_data/', {
         method: 'POST',
-        body: formData,
-        // When using FormData, fetch automatically sets the 'Content-Type' header to 'multipart/form-data'
+        body: ocrFormData,
       });
 
-      if (!response.ok) {
-        // Handle HTTP errors (e.g., 400, 500)
-        const errorData = await response.json();
-        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      if (!ocrResponse.ok) {
+        const errorData = await ocrResponse.json();
+        throw new Error(errorData.detail || `OCR service error! status: ${ocrResponse.status}`);
       }
 
-      const data = await response.json();
-      setRawOcrOutput(data.raw_ocr_output);
-      setStructuredDishes(data.structured_menu_data);
+      const ocrData = await ocrResponse.json();
+      setRawOcrOutput(ocrData.raw_ocr_output);
 
-      // For now, let's just use the structured dish names to display something
-      // This will be replaced by actual generated image URLs later
-      const mockGenerated = data.structured_menu_data.map(dish => ({
-        dishName: dish.name,
-        imageUrl: `https://via.placeholder.com/300x200?text=${encodeURIComponent(dish.name)}`
+      // --- Step 2: Call NLU Service with raw OCR text ---
+      const nluResponse = await fetch('http://localhost:8001/process_menu_text/', { // Updated endpoint
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ raw_ocr_text: ocrData.raw_ocr_output }), // Send raw text
+      });
+
+      if (!nluResponse.ok) {
+        const errorData = await nluResponse.json();
+        throw new Error(errorData.detail || `NLU service error! status: ${nluResponse.status}`);
+      }
+
+      const nluData = await nluResponse.json();
+      setStructuredDishes(nluData.structured_menu_data); // Structured data now comes from NLU
+      setNluPrompts(nluData.processed_dishes);
+
+      // Use NLU prompts for placeholders
+      const mockGenerated = nluData.processed_dishes.map(item => ({
+        dishName: item.dish_name,
+        imageUrl: `https://via.placeholder.com/300x200?text=${encodeURIComponent(item.dish_name.substring(0, 20) + '...')}` // Placeholder based on dish name
       }));
       setGeneratedImages(mockGenerated);
 
+
     } catch (err) {
-      console.error("Error uploading image:", err);
-      setError(`Failed to process image: ${err.message}`);
+      console.error("Error processing menu:", err);
+      setError(`Failed to process menu: ${err.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -88,7 +105,7 @@ function App() {
         <input
           type="file"
           accept="image/*"
-          capture="environment" // Hint to mobile browsers to prefer camera
+          capture="environment"
           onChange={handleImageChange}
           className="hidden-file-input"
           ref={fileInputRef}
@@ -118,7 +135,7 @@ function App() {
           </div>
         )}
 
-        <h3>Structured Dishes (from OCR):</h3>
+        <h3>Structured Dishes (from LLM):</h3> {/* Updated label */}
         {structuredDishes.length > 0 ? (
           <ul>
             {structuredDishes.map((dish, index) => (
@@ -128,7 +145,20 @@ function App() {
             ))}
           </ul>
         ) : (
-          !isLoading && !error && selectedImage && <p>No structured dishes found yet or awaiting upload.</p>
+          !isLoading && !error && selectedImage && <p>LLM is processing or no structured dishes found.</p>
+        )}
+
+        <h3>Generated Image Prompts (from LLM):</h3> {/* Updated label */}
+        {nluPrompts.length > 0 ? (
+          <ul>
+            {nluPrompts.map((item, index) => (
+              <li key={index}>
+                <strong>{item.dish_name}:</strong> <em>{item.image_prompt}</em>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          !isLoading && !error && selectedImage && structuredDishes.length > 0 && <p>LLM is processing or no prompts generated.</p>
         )}
 
         <h2>Generated Food Pictures (Placeholder)</h2>
@@ -142,7 +172,7 @@ function App() {
             ))}
           </div>
         ) : (
-          !isLoading && !error && selectedImage && <p className="no-image-placeholder">Images will appear here after generation (currently placeholders).</p>
+          !isLoading && !error && selectedImage && nluPrompts.length > 0 && <p className="no-image-placeholder">Images will appear here after generation (currently placeholders).</p>
         )}
       </div>
     </div>
